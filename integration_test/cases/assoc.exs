@@ -9,7 +9,12 @@ defmodule Ecto.Integration.AssocTest do
   alias Ecto.Integration.User
   alias Ecto.Integration.PostUser
   alias Ecto.Integration.Comment
+  alias Ecto.Integration.CompositePk
+  alias Ecto.Integration.CompositeNamedUser
+  alias Ecto.Integration.CompositeNamedUserHasOne
   alias Ecto.Integration.Permalink
+  alias Ecto.Integration.PostUserCompositePk
+  alias Ecto.Integration.PostWithCompositeAuthor
 
   test "has_many assoc" do
     p1 = TestRepo.insert!(%Post{title: "1"})
@@ -53,6 +58,370 @@ defmodule Ecto.Integration.AssocTest do
     assert [p1, p2] = TestRepo.all Ecto.assoc([l1, l2, l3], :post)
     assert p1.id == pid1
     assert p2.id == pid2
+  end
+
+  test "composite belongs_to assoc" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    pu1 = TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    pu2 = TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+
+    parents = TestRepo.all(Ecto.assoc([pu1, pu2], :composite_pk))
+
+    assert MapSet.new(Enum.map(parents, &{&1.a, &1.b})) ==
+             MapSet.new([{pu1.post_id, pu1.user_id}, {pu2.post_id, pu2.user_id}])
+
+    pu3 = %PostUserCompositePk{post_id: pu1.post_id}
+
+    assert [%CompositePk{a: a, b: b}] =
+             TestRepo.all(Ecto.assoc([pu1, pu3], :composite_pk))
+
+    assert {a, b} == {pu1.post_id, pu1.user_id}
+  end
+
+  test "composite has_many assoc" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    pu1 = TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    pu2 = TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+
+    TestRepo.insert!(%PostUserCompositePk{post_id: pu1.post_id, user_id: pu2.user_id})
+
+    owners = [
+      %CompositePk{a: pu1.post_id, b: pu1.user_id},
+      %CompositePk{a: pu2.post_id, b: pu2.user_id}
+    ]
+
+    children = TestRepo.all(Ecto.assoc(owners, :post_users))
+
+    assert MapSet.new(Enum.map(children, &{&1.post_id, &1.user_id})) ==
+             MapSet.new([{pu1.post_id, pu1.user_id}, {pu2.post_id, pu2.user_id}])
+
+    cp3 = %CompositePk{a: pu1.post_id}
+    assert TestRepo.all(Ecto.assoc(cp3, :post_users)) == []
+  end
+
+  test "composite has_one assoc" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    pu1 = TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    pu2 = TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+
+    TestRepo.insert!(%PostUserCompositePk{post_id: pu1.post_id, user_id: pu2.user_id})
+
+    owners = [
+      %CompositePk{a: pu1.post_id, b: pu1.user_id},
+      %CompositePk{a: pu2.post_id, b: pu2.user_id}
+    ]
+
+    children = TestRepo.all(Ecto.assoc(owners, :post_user))
+
+    assert MapSet.new(Enum.map(children, &{&1.post_id, &1.user_id})) ==
+             MapSet.new([{pu1.post_id, pu1.user_id}, {pu2.post_id, pu2.user_id}])
+
+    assert TestRepo.all(Ecto.assoc(%CompositePk{a: pu1.post_id}, :post_user)) == []
+  end
+
+  test "composite has_many joins" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    pu1 = TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    pu2 = TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+
+    pairs =
+      from(parent in CompositePk,
+        join: child in assoc(parent, :post_users),
+        select: {parent.a, parent.b, child.post_id, child.user_id}
+      )
+      |> TestRepo.all()
+
+    assert MapSet.new(pairs) ==
+             MapSet.new([
+               {pu1.post_id, pu1.user_id, pu1.post_id, pu1.user_id},
+               {pu2.post_id, pu2.user_id, pu2.post_id, pu2.user_id}
+             ])
+  end
+
+  test "composite has_one joins" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    pu1 = TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    pu2 = TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+
+    pairs =
+      from(parent in CompositePk,
+        join: child in assoc(parent, :post_user),
+        select: {parent.a, parent.b, child.post_id, child.user_id}
+      )
+      |> TestRepo.all()
+
+    assert MapSet.new(pairs) ==
+             MapSet.new([
+               {pu1.post_id, pu1.user_id, pu1.post_id, pu1.user_id},
+               {pu2.post_id, pu2.user_id, pu2.post_id, pu2.user_id}
+             ])
+
+    cp1 = %CompositePk{a: pu1.post_id, b: pu1.user_id}
+    assert [%Post{id: pid1}] = TestRepo.all(Ecto.assoc(cp1, :post_via_post_user))
+    assert pid1 == p1.id
+
+    cp2 = %CompositePk{a: pu2.post_id, b: pu2.user_id}
+    assert [%Post{id: pid2}] = TestRepo.all(Ecto.assoc(cp2, :post_via_post_user))
+    assert pid2 == p2.id
+  end
+
+  test "composite has_many put_assoc" do
+    post = TestRepo.insert!(%Post{})
+    user = TestRepo.insert!(%User{})
+
+    parent =
+      %CompositePk{a: post.id, b: user.id}
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.put_assoc(:post_users, [%PostUserCompositePk{}])
+      |> TestRepo.insert!()
+
+    assert [%PostUserCompositePk{post_id: post_id, user_id: user_id}] = parent.post_users
+    assert {post_id, user_id} == {post.id, user.id}
+    assert [%PostUserCompositePk{}] = TestRepo.all(Ecto.assoc(parent, :post_users))
+  end
+
+  test "composite has_many through assoc" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    pu1 = TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    _pu2 = TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+
+    cp1 = %CompositePk{a: pu1.post_id, b: pu1.user_id}
+
+    assert [%Post{id: pid1}] = TestRepo.all(Ecto.assoc(cp1, :posts_via_post_users))
+    assert pid1 == p1.id
+
+    assert [%Post{id: ^pid1}] = TestRepo.all(Ecto.assoc(cp1, [:post_users, :post]))
+  end
+
+  test "composite has_many assoc on delete deletes all" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    pu1 = TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    pu2 = TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+    pu3 = TestRepo.insert!(%PostUserCompositePk{post_id: pu1.post_id, user_id: pu2.user_id})
+
+    parent = %CompositePk{a: pu1.post_id, b: pu1.user_id}
+    TestRepo.delete!(parent)
+
+    assert TestRepo.all(Ecto.assoc(parent, :post_users)) == []
+
+    assert [%PostUserCompositePk{}] =
+             TestRepo.all(Ecto.assoc(%CompositePk{a: pu3.post_id, b: pu3.user_id}, :post_users))
+  end
+
+  test "composite has_many put_assoc nilify" do
+    user = %User{name: "east"} |> TestRepo.insert!() |> TestRepo.preload(:posts_by_name)
+
+    user =
+      user
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.put_assoc(:posts_by_name, [%PostWithCompositeAuthor{}])
+      |> TestRepo.update!()
+
+    assert [%PostWithCompositeAuthor{id: post_id, author_id: author_id, title: "east"}] =
+             user.posts_by_name
+
+    assert author_id == user.id
+
+    user
+    |> Ecto.Changeset.change()
+    |> Ecto.Changeset.put_assoc(:posts_by_name, [])
+    |> TestRepo.update!()
+
+    assert %PostWithCompositeAuthor{author_id: nil, title: nil} =
+             TestRepo.get!(PostWithCompositeAuthor, post_id)
+  end
+
+  test "composite has_one put_assoc nilify" do
+    user = %User{name: "east"} |> TestRepo.insert!() |> TestRepo.preload(:post_by_name)
+
+    user =
+      user
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.put_assoc(:post_by_name, %PostWithCompositeAuthor{})
+      |> TestRepo.update!()
+
+    assert %PostWithCompositeAuthor{id: post_id, author_id: author_id, title: "east"} =
+             user.post_by_name
+
+    assert author_id == user.id
+
+    user =
+      user
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.put_assoc(:post_by_name, %PostWithCompositeAuthor{})
+      |> TestRepo.update!()
+
+    assert %PostWithCompositeAuthor{author_id: nil, title: nil} =
+             TestRepo.get!(PostWithCompositeAuthor, post_id)
+
+    assert %PostWithCompositeAuthor{id: replacement_id, author_id: ^author_id, title: "east"} =
+             user.post_by_name
+
+    user
+    |> Ecto.Changeset.change()
+    |> Ecto.Changeset.put_assoc(:post_by_name, nil)
+    |> TestRepo.update!()
+
+    assert %PostWithCompositeAuthor{author_id: nil, title: nil} =
+             TestRepo.get!(PostWithCompositeAuthor, replacement_id)
+  end
+
+  test "composite has_one on delete nilifies all" do
+    user = TestRepo.insert!(%User{name: "east"})
+    matching = TestRepo.insert!(%PostWithCompositeAuthor{author_id: user.id, title: "east"})
+    cross = TestRepo.insert!(%PostWithCompositeAuthor{author_id: user.id, title: "west"})
+
+    TestRepo.delete!(%CompositeNamedUserHasOne{id: user.id, name: user.name})
+
+    assert %PostWithCompositeAuthor{author_id: nil, title: nil} =
+             TestRepo.get!(PostWithCompositeAuthor, matching.id)
+
+    assert %PostWithCompositeAuthor{author_id: author_id, title: "west"} =
+             TestRepo.get!(PostWithCompositeAuthor, cross.id)
+
+    assert author_id == user.id
+  end
+
+  test "composite has_many on delete nilifies all" do
+    user = TestRepo.insert!(%User{name: "east"})
+    matching = TestRepo.insert!(%PostWithCompositeAuthor{author_id: user.id, title: "east"})
+    cross = TestRepo.insert!(%PostWithCompositeAuthor{author_id: user.id, title: "west"})
+
+    TestRepo.delete!(%CompositeNamedUser{id: user.id, name: user.name})
+
+    assert %PostWithCompositeAuthor{author_id: nil, title: nil} =
+             TestRepo.get!(PostWithCompositeAuthor, matching.id)
+
+    assert %PostWithCompositeAuthor{author_id: author_id, title: "west"} =
+             TestRepo.get!(PostWithCompositeAuthor, cross.id)
+
+    assert author_id == user.id
+  end
+
+  test "composite belongs_to joins" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    pu1 = TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    pu2 = TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+
+    pairs =
+      from(c in PostUserCompositePk,
+        join: parent in assoc(c, :composite_pk),
+        select: {c.post_id, c.user_id, parent.a, parent.b}
+      )
+      |> TestRepo.all()
+
+    assert MapSet.new(pairs) ==
+             MapSet.new([
+               {pu1.post_id, pu1.user_id, pu1.post_id, pu1.user_id},
+               {pu2.post_id, pu2.user_id, pu2.post_id, pu2.user_id}
+             ])
+  end
+
+  test "composite belongs_to through joins" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    pu1 = TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    pu2 = TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+
+    pairs =
+      from(c in PostUserCompositePk,
+        join: post in assoc(c, :post_via_composite_pk),
+        select: {c.post_id, c.user_id, post.id}
+      )
+      |> TestRepo.all()
+
+    assert MapSet.new(pairs) ==
+             MapSet.new([
+               {pu1.post_id, pu1.user_id, p1.id},
+               {pu2.post_id, pu2.user_id, p2.id}
+             ])
+  end
+
+  test "composite belongs_to put_assoc" do
+    post = TestRepo.insert!(%Post{})
+    user = TestRepo.insert!(%User{})
+
+    child =
+      %PostUserCompositePk{}
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.put_assoc(:composite_pk, %CompositePk{a: post.id, b: user.id})
+      |> TestRepo.insert!()
+
+    assert child.post_id == post.id
+    assert child.user_id == user.id
+    assert %CompositePk{a: a, b: b} = child.composite_pk
+    assert {a, b} == {post.id, user.id}
   end
 
   test "has_many through assoc" do

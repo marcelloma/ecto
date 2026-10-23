@@ -42,6 +42,93 @@ defmodule Ecto.ChangesetTest do
     end
   end
 
+  defmodule CompositeParent do
+    use Ecto.Schema
+
+    schema "composite_parents" do
+      field :tenant_id, :string
+
+      has_many :children, Ecto.ChangesetTest.CompositeChild,
+        references: [:tenant_id, :id],
+        foreign_key: [:tenant_id, :parent_id]
+
+      has_one :child, Ecto.ChangesetTest.CompositeChild,
+        references: [:tenant_id, :id],
+        foreign_key: [:tenant_id, :parent_id]
+    end
+  end
+
+  defmodule CompositeChild do
+    use Ecto.Schema
+
+    schema "composite_children" do
+      field :tenant_id, :string
+      field :parent_id, :id
+
+      belongs_to :parent, CompositeParent,
+        foreign_key: [:tenant_id, :parent_id],
+        references: [:tenant_id, :id],
+        define_field: false,
+        on_replace: :nilify
+    end
+  end
+
+  defmodule ReversedCompositeChild do
+    use Ecto.Schema
+
+    schema "composite_children" do
+      field :tenant_id, :string
+      field :parent_id, :id
+
+      belongs_to :parent, CompositeParent,
+        foreign_key: [:parent_id, :tenant_id],
+        references: [:id, :tenant_id],
+        define_field: false
+    end
+  end
+
+  test "apply_changes copies every composite belongs_to key" do
+    parent = %CompositeParent{id: 10, tenant_id: "east"}
+
+    child =
+      %CompositeChild{}
+      |> change()
+      |> put_assoc(:parent, parent)
+      |> apply_changes()
+
+    assert child.parent == parent
+    assert child.tenant_id == "east"
+    assert child.parent_id == 10
+  end
+
+  test "apply_changes uses changed composite parent keys" do
+    parent = %CompositeParent{id: 10, tenant_id: "east"}
+
+    child =
+      %CompositeChild{}
+      |> change()
+      |> put_assoc(:parent, change(parent, tenant_id: "west"))
+      |> apply_changes()
+
+    assert child.parent.tenant_id == "west"
+    assert child.tenant_id == "west"
+    assert child.parent_id == 10
+  end
+
+  test "apply_changes clears every composite belongs_to key" do
+    parent = %CompositeParent{id: 10, tenant_id: "east"}
+
+    child =
+      %CompositeChild{tenant_id: "east", parent_id: 10, parent: parent}
+      |> change()
+      |> put_assoc(:parent, nil)
+      |> apply_changes()
+
+    assert child.parent == nil
+    assert child.tenant_id == nil
+    assert child.parent_id == nil
+  end
+
   defmodule Email do
     use Ecto.Type
 
@@ -3170,6 +3257,30 @@ defmodule Ecto.ChangesetTest do
     end
   end
 
+  test "assoc_constraint/3 uses the first composite foreign key" do
+    changeset = change(%CompositeChild{}) |> assoc_constraint(:parent)
+
+    assert [
+             %{
+               type: :foreign_key,
+               field: :parent,
+               constraint: "composite_children_tenant_id_fkey",
+               match: :exact,
+               error_message: "does not exist",
+               error_type: :assoc
+             }
+           ] = constraints(changeset)
+
+    changeset = change(%ReversedCompositeChild{}) |> assoc_constraint(:parent)
+    assert [%{constraint: "composite_children_parent_id_fkey"}] = constraints(changeset)
+
+    changeset =
+      change(%CompositeChild{})
+      |> assoc_constraint(:parent, name: :custom_parent_fkey)
+
+    assert [%{constraint: "custom_parent_fkey"}] = constraints(changeset)
+  end
+
   test "assoc_constraint/3 on field with :source" do
     changeset = change(%Post{}) |> assoc_constraint(:category)
 
@@ -3353,6 +3464,28 @@ defmodule Ecto.ChangesetTest do
                error_type: :no_assoc
              }
            ] = constraints(changeset)
+  end
+
+  test "no_assoc_constraint/3 with composite has_many and has_one" do
+    many = change(%CompositeParent{}) |> no_assoc_constraint(:children)
+
+    assert [
+             %{
+               field: :children,
+               constraint: "composite_children_tenant_id_fkey",
+               error_message: "are still associated with this entry"
+             }
+           ] = constraints(many)
+
+    one = change(%CompositeParent{}) |> no_assoc_constraint(:child)
+
+    assert [
+             %{
+               field: :child,
+               constraint: "composite_children_tenant_id_fkey",
+               error_message: "is still associated with this entry"
+             }
+           ] = constraints(one)
   end
 
   test "no_assoc_constraint/3 with errors" do

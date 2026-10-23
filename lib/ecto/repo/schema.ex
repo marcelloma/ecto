@@ -1246,6 +1246,29 @@ defmodule Ecto.Repo.Schema do
     {%{changeset | changes: changes}, parent, child, reset}
   end
 
+  defp reset_parent?(changes, data, %{owner_key: owner_keys} = assoc)
+       when is_list(owner_keys) do
+    %{field: field, related_key: related_keys} = assoc
+
+    if Enum.any?(owner_keys, &Map.has_key?(changes, &1)) do
+      owner_values = Enum.map(owner_keys, &Map.get(changes, &1, Map.fetch!(data, &1)))
+
+      case Map.fetch!(data, field) do
+        %Ecto.Association.NotLoaded{} ->
+          false
+
+        nil ->
+          Enum.any?(owner_values, &(not is_nil(&1)))
+
+        related ->
+          Enum.zip(related_keys, owner_values)
+          |> Enum.any?(fn {key, value} -> Map.fetch!(related, key) != value end)
+      end
+    else
+      false
+    end
+  end
+
   defp reset_parent?(changes, data, assoc) do
     %{field: field, owner_key: owner_key, related_key: related_key} = assoc
 
@@ -1297,17 +1320,24 @@ defmodule Ecto.Repo.Schema do
     Enum.reduce(assocs, changes, fn {refl, _}, acc ->
       %{field: field, owner_key: owner_key, related_key: related_key} = refl
       related = Map.get(struct, field)
-      value = related && Map.fetch!(related, related_key)
+      keys =
+        if is_list(owner_key),
+          do: Enum.zip(owner_key, related_key),
+          else: [{owner_key, related_key}]
 
-      case Map.fetch(changes, owner_key) do
-        {:ok, current} when current != value ->
-          raise ArgumentError,
-                "cannot change belongs_to association `#{field}` because there is " <>
-                  "already a change setting its foreign key `#{owner_key}` to `#{inspect(current)}`"
+      Enum.reduce(keys, acc, fn {owner_key, related_key}, acc ->
+        value = related && Map.fetch!(related, related_key)
 
-        _ ->
-          Map.put(acc, owner_key, value)
-      end
+        case Map.fetch(changes, owner_key) do
+          {:ok, current} when current != value ->
+            raise ArgumentError,
+                  "cannot change belongs_to association `#{field}` because there is " <>
+                    "already a change setting its foreign key `#{owner_key}` to `#{inspect(current)}`"
+
+          _ ->
+            Map.put(acc, owner_key, value)
+        end
+      end)
     end)
   end
 

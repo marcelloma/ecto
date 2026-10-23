@@ -1,4 +1,4 @@
-import Ecto.Query, only: [from: 1, from: 2, join: 4, join: 5, distinct: 3, where: 3]
+import Ecto.Query, only: [from: 1, from: 2, join: 4, join: 5, distinct: 3, where: 3, dynamic: 2]
 
 defmodule Ecto.Association.NotLoaded do
   @moduledoc """
@@ -36,7 +36,7 @@ defmodule Ecto.Association do
           required(:cardinality) => :one | :many,
           required(:relationship) => :parent | :child,
           required(:owner) => atom,
-          required(:owner_key) => atom,
+          required(:owner_key) => atom | [atom],
           required(:field) => atom,
           required(:unique) => boolean,
           optional(atom) => any
@@ -234,10 +234,10 @@ defmodule Ecto.Association do
         curr_rel, {prev_rel, query, counter, _} ->
           related_queryable = curr_rel.schema
 
+          on = through_join_condition(prev_rel.out_key, curr_rel.in_key, counter)
+
           next =
-            join(query, :inner, [{src, counter}], dest in ^related_queryable,
-              on: field(src, ^prev_rel.out_key) == field(dest, ^curr_rel.in_key)
-            )
+            join(query, :inner, [], dest in ^related_queryable, on: ^on)
             |> combine_joins_query(curr_rel.where, counter + 1)
 
           {curr_rel, next, counter + 1, curr_rel.out_key}
@@ -248,18 +248,69 @@ defmodule Ecto.Association do
     values = List.wrap(values)
 
     query =
-      case {join_to, values} do
-        {nil, [single_value]} ->
+      case {join_to, dest_out_key, values} do
+        {nil, dest_out_keys, values} when is_list(dest_out_keys) ->
+          values =
+            Enum.reject(values, fn value -> value |> Tuple.to_list() |> Enum.any?(&is_nil/1) end)
+
+          case values do
+            [] ->
+              where(query, [{dest, final_bind}], false)
+
+            [_ | _] = values ->
+              condition =
+                Enum.reduce(values, nil, fn value, condition ->
+                  match = through_key_condition(dest_out_keys, value, final_bind)
+
+                  if condition do
+                    dynamic([{dest, final_bind}], ^condition or ^match)
+                  else
+                    match
+                  end
+                end)
+
+              where(query, [{dest, final_bind}], ^condition)
+          end
+
+        {nil, dest_out_key, [single_value]} ->
           where(query, [{dest, final_bind}], field(dest, ^dest_out_key) == ^single_value)
 
-        {nil, values} ->
+        {nil, dest_out_key, values} ->
           where(query, [{dest, final_bind}], field(dest, ^dest_out_key) in ^values)
 
-        {_, _} ->
+        {_, _, _} ->
           query
       end
 
     combine_assoc_query(query, source.where || [])
+  end
+
+  defp through_join_condition(source_keys, related_keys, binding) do
+    related_binding = binding + 1
+
+    Enum.zip(List.wrap(source_keys), List.wrap(related_keys))
+    |> Enum.reduce(nil, fn {source_key, related_key}, on ->
+      match =
+        dynamic(
+          [{src, binding}, {dest, related_binding}],
+          field(src, ^source_key) == field(dest, ^related_key)
+        )
+
+      if on do
+        dynamic([{src, binding}, {dest, related_binding}], ^on and ^match)
+      else
+        match
+      end
+    end)
+  end
+
+  defp through_key_condition(keys, value, binding) do
+    [{key, value} | pairs] = Enum.zip(keys, Tuple.to_list(value))
+    condition = dynamic([{dest, binding}], field(dest, ^key) == ^value)
+
+    Enum.reduce(pairs, condition, fn {key, value}, condition ->
+      dynamic([{dest, binding}], ^condition and field(dest, ^key) == ^value)
+    end)
   end
 
   defp flatten_through_chain(owner, [], acc), do: {owner, acc}
@@ -381,6 +432,94 @@ defmodule Ecto.Association do
     %{params: params, expr: expr} = where_expr
     {expr, params} = expand_where(conditions, expr, Enum.reverse(params), length(params), 0)
     %{query | wheres: wheres ++ [%{where_expr | expr: expr, params: params}]}
+  end
+
+  @doc false
+  def composite_assoc_query(
+        %{related_key: related_keys, queryable: queryable} = assoc,
+        query,
+        [tuple]
+      ) do
+    values = Tuple.to_list(tuple)
+
+    query =
+      if Enum.any?(values, &is_nil/1) do
+        from(x in (query || queryable), where: false)
+      else
+        from(x in (query || queryable), where: ^Enum.zip(related_keys, values))
+      end
+
+    combine_assoc_query(query, assoc.where)
+  end
+
+  def composite_assoc_query(%{queryable: queryable} = assoc, query, []) do
+    from(x in (query || queryable), where: false)
+    |> combine_assoc_query(assoc.where)
+  end
+
+  def composite_assoc_query(
+        %{related_key: related_keys, queryable: queryable} = assoc,
+        query,
+        values
+      ) do
+    values =
+      values
+      |> Enum.uniq()
+      |> Enum.reject(fn value -> value |> Tuple.to_list() |> Enum.any?(&is_nil/1) end)
+
+    case values do
+      [] ->
+        composite_assoc_query(assoc, query, [])
+
+      [value] ->
+        composite_assoc_query(assoc, query, [value])
+
+      [value | rest] ->
+        condition = composite_key_condition(related_keys, value)
+
+        condition =
+          Enum.reduce(rest, condition, fn value, condition ->
+            match = composite_key_condition(related_keys, value)
+            dynamic([x], ^condition or ^match)
+          end)
+
+        from(x in (query || queryable), where: ^condition)
+        |> combine_assoc_query(assoc.where)
+    end
+  end
+
+  @doc false
+  def composite_preload_query(
+        %{related_key: related_keys, queryable: queryable} = assoc,
+        query,
+        values
+      ) do
+    values = Enum.reject(values, fn tuple -> Enum.any?(Tuple.to_list(tuple), &is_nil/1) end)
+
+    query =
+      if values == [] do
+        from(x in (query || queryable), where: false)
+      else
+        related_keys
+        |> Enum.with_index()
+        |> Enum.reduce(query || queryable, fn {key, index}, query ->
+          case Enum.uniq(Enum.map(values, &elem(&1, index))) do
+            [value] -> where(query, [x], field(x, ^key) == ^value)
+            values -> where(query, [x], field(x, ^key) in ^values)
+          end
+        end)
+      end
+
+    combine_assoc_query(query, assoc.where)
+  end
+
+  defp composite_key_condition(related_keys, values) do
+    [{key, value} | pairs] = Enum.zip(related_keys, Tuple.to_list(values))
+    condition = dynamic([x], field(x, ^key) == ^value)
+
+    Enum.reduce(pairs, condition, fn {key, value}, condition ->
+      dynamic([x], ^condition and field(x, ^key) == ^value)
+    end)
   end
 
   defp expand_where(conditions, expr, params, counter, binding) do
@@ -755,6 +894,23 @@ defmodule Ecto.Association.Has do
   ]
 
   @impl true
+  def after_verify_validation(%{related: related, related_key: related_keys})
+      when is_list(related_keys) do
+    cond do
+      not Code.ensure_loaded?(related) ->
+        {:error, "associated schema #{inspect(related)} does not exist"}
+
+      not function_exported?(related, :__schema__, 2) ->
+        {:error, "associated module #{inspect(related)} is not an Ecto schema"}
+
+      missing = Enum.find(related_keys, &is_nil(related.__schema__(:type, &1))) ->
+        {:error, "associated schema #{inspect(related)} does not have field `#{missing}`"}
+
+      true ->
+        :ok
+    end
+  end
+
   def after_verify_validation(%{queryable: queryable, related_key: related_key}) do
     cond do
       not is_atom(queryable) ->
@@ -785,10 +941,34 @@ defmodule Ecto.Association.Has do
       |> Module.get_attribute(:primary_key)
       |> get_ref(opts[:references], name)
 
-    unless Module.get_attribute(module, :ecto_fields)[ref] do
-      raise ArgumentError,
-            "schema does not have the field #{inspect(ref)} used by " <>
-              "association #{inspect(name)}, please set the :references option accordingly"
+    foreign_key = opts[:foreign_key]
+
+    if is_list(ref) or is_list(foreign_key) do
+      unless is_list(foreign_key) and foreign_key != [] and Enum.all?(foreign_key, &is_atom/1) do
+        raise ArgumentError,
+              ":foreign_key for association #{inspect(name)} must be a non-empty list " <>
+                "of atoms when :references is a list, got: #{inspect(foreign_key)}"
+      end
+
+      unless is_list(ref) and ref != [] and Enum.all?(ref, &is_atom/1) do
+        raise ArgumentError,
+              ":references for association #{inspect(name)} must be a non-empty list " <>
+                "of atoms when :foreign_key is a list, got: #{inspect(ref)}"
+      end
+
+      if length(ref) != length(foreign_key) do
+        raise ArgumentError,
+              ":foreign_key and :references for association #{inspect(name)} must have " <>
+                "the same number of fields, got #{length(foreign_key)} foreign keys and #{length(ref)} references"
+      end
+    end
+
+    for key <- List.wrap(ref) do
+      unless Module.get_attribute(module, :ecto_fields)[key] do
+        raise ArgumentError,
+              "schema does not have the field #{inspect(key)} used by " <>
+                "association #{inspect(name)}, please set the :references option accordingly"
+      end
     end
 
     if opts[:through] do
@@ -831,7 +1011,7 @@ defmodule Ecto.Association.Has do
       owner: module,
       related: related,
       owner_key: ref,
-      related_key: opts[:foreign_key] || Ecto.Association.association_key(module, ref),
+      related_key: foreign_key || Ecto.Association.association_key(module, ref),
       queryable: queryable,
       on_delete: on_delete,
       on_replace: on_replace,
@@ -851,12 +1031,39 @@ defmodule Ecto.Association.Has do
   defp get_ref(_primary_key, references, _name), do: references
 
   @impl true
+  def build(%{owner_key: owner_keys, related_key: related_keys} = refl, owner, attributes)
+      when is_list(owner_keys) do
+    data = refl |> build(owner) |> struct(attributes)
+
+    Enum.zip(owner_keys, related_keys)
+    |> Enum.reduce(data, fn {owner_key, related_key}, data ->
+      Map.put(data, related_key, Map.get(owner, owner_key))
+    end)
+  end
+
   def build(%{owner_key: owner_key, related_key: related_key} = refl, owner, attributes) do
     data = refl |> build(owner) |> struct(attributes)
     %{data | related_key => Map.get(owner, owner_key)}
   end
 
   @impl true
+  def joins_query(
+        %{related_key: related_keys, owner: owner, owner_key: owner_keys, queryable: queryable} =
+          assoc
+      )
+      when is_list(owner_keys) do
+    [{owner_key, related_key} | keys] = Enum.zip(owner_keys, related_keys)
+    on = dynamic([o, q], field(q, ^related_key) == field(o, ^owner_key))
+
+    on =
+      Enum.reduce(keys, on, fn {owner_key, related_key}, on ->
+        dynamic([o, q], ^on and field(q, ^related_key) == field(o, ^owner_key))
+      end)
+
+    from(o in owner, join: q in ^queryable, on: ^on)
+    |> Ecto.Association.combine_joins_query(assoc.where, 1)
+  end
+
   def joins_query(
         %{related_key: related_key, owner: owner, owner_key: owner_key, queryable: queryable} =
           assoc
@@ -866,6 +1073,11 @@ defmodule Ecto.Association.Has do
   end
 
   @impl true
+  def assoc_query(%{related_key: related_keys} = assoc, query, values)
+      when is_list(related_keys) do
+    Ecto.Association.composite_assoc_query(assoc, query, values)
+  end
+
   def assoc_query(%{related_key: related_key, queryable: queryable} = assoc, query, [value]) do
     from(x in (query || queryable), where: field(x, ^related_key) == ^value)
     |> Ecto.Association.combine_assoc_query(assoc.where)
@@ -923,8 +1135,13 @@ defmodule Ecto.Association.Has do
     %{data: parent, repo: repo} = parent_changeset
     %{action: action, changes: changes} = changeset
 
-    {key, value} = parent_key(assoc, parent)
-    changeset = update_parent_key(changeset, action, key, value)
+    keys = parent_keys(assoc, parent)
+
+    changeset =
+      Enum.reduce(keys, changeset, fn {key, value}, changeset ->
+        update_parent_key(changeset, action, key, value)
+      end)
+
     changeset = Ecto.Association.update_parent_prefix(changeset, parent)
 
     case apply(repo, action, [changeset, opts]) do
@@ -932,8 +1149,12 @@ defmodule Ecto.Association.Has do
         if action == :delete, do: {:ok, nil}, else: ok
 
       {:error, changeset} ->
-        original = Map.get(changes, key)
-        {:error, put_in(changeset.changes[key], original)}
+        changeset =
+          Enum.reduce(keys, changeset, fn {key, _value}, changeset ->
+            put_in(changeset.changes[key], Map.get(changes, key))
+          end)
+
+        {:error, changeset}
     end
   end
 
@@ -943,12 +1164,19 @@ defmodule Ecto.Association.Has do
   defp update_parent_key(changeset, _action, key, value),
     do: Ecto.Changeset.put_change(changeset, key, value)
 
-  defp parent_key(%{related_key: related_key}, nil) do
-    {related_key, nil}
+  defp parent_keys(%{related_key: related_keys}, nil) when is_list(related_keys) do
+    Enum.map(related_keys, &{&1, nil})
   end
 
-  defp parent_key(%{owner_key: owner_key, related_key: related_key}, owner) do
-    {related_key, Map.get(owner, owner_key)}
+  defp parent_keys(%{related_key: related_key}, nil), do: [{related_key, nil}]
+
+  defp parent_keys(%{owner_key: owner_keys, related_key: related_keys}, owner)
+       when is_list(owner_keys) do
+    Enum.zip(related_keys, Enum.map(owner_keys, &Map.get(owner, &1)))
+  end
+
+  defp parent_keys(%{owner_key: owner_key, related_key: related_key}, owner) do
+    [{related_key, Map.get(owner, owner_key)}]
   end
 
   ## Relation callbacks
@@ -971,9 +1199,36 @@ defmodule Ecto.Association.Has do
   end
 
   @doc false
+  def nilify_all(%{related_key: related_keys} = refl, parent, repo_name, opts)
+      when is_list(related_keys) do
+    if query = on_delete_query(refl, parent) do
+      set = Enum.map(related_keys, &{&1, nil})
+      Ecto.Repo.Queryable.update_all(repo_name, query, [set: set], opts)
+    end
+  end
+
   def nilify_all(%{related_key: related_key} = refl, parent, repo_name, opts) do
     if query = on_delete_query(refl, parent) do
       Ecto.Repo.Queryable.update_all(repo_name, query, [set: [{related_key, nil}]], opts)
+    end
+  end
+
+  defp on_delete_query(
+         %{owner_key: owner_keys, related_key: related_keys, queryable: queryable},
+         parent
+       )
+       when is_list(owner_keys) do
+    values = Enum.map(owner_keys, &Map.get(parent, &1))
+
+    unless Enum.any?(values, &is_nil/1) do
+      query = from x in queryable, where: ^Enum.zip(related_keys, values)
+
+      parent
+      |> Ecto.get_meta(:prefix)
+      |> case do
+        nil -> query
+        prefix -> Ecto.Query.put_query_prefix(query, prefix)
+      end
     end
   end
 
@@ -1123,6 +1378,31 @@ defmodule Ecto.Association.BelongsTo do
   ]
 
   @impl true
+  def after_verify_validation(%{
+        owner: owner,
+        owner_key: owner_keys,
+        related: related,
+        related_key: related_keys
+      })
+      when is_list(owner_keys) and is_list(related_keys) do
+    cond do
+      not Code.ensure_loaded?(related) ->
+        {:error, "associated schema #{inspect(related)} does not exist"}
+
+      not function_exported?(related, :__schema__, 2) ->
+        {:error, "associated module #{inspect(related)} is not an Ecto schema"}
+
+      missing = Enum.find(owner_keys, &is_nil(owner.__schema__(:type, &1))) ->
+        {:error, "schema #{inspect(owner)} does not have field `#{missing}`"}
+
+      missing = Enum.find(related_keys, &is_nil(related.__schema__(:type, &1))) ->
+        {:error, "associated schema #{inspect(related)} does not have field `#{missing}`"}
+
+      true ->
+        :ok
+    end
+  end
+
   def after_verify_validation(%{queryable: queryable, related_key: related_key}) do
     cond do
       not is_atom(queryable) ->
@@ -1186,6 +1466,23 @@ defmodule Ecto.Association.BelongsTo do
 
   @impl true
   def joins_query(
+        %{related_key: related_keys, owner: owner, owner_key: owner_keys, queryable: queryable} =
+          assoc
+      )
+      when is_list(owner_keys) and is_list(related_keys) do
+    [{owner_key, related_key} | keys] = Enum.zip(owner_keys, related_keys)
+    on = dynamic([o, q], field(q, ^related_key) == field(o, ^owner_key))
+
+    on =
+      Enum.reduce(keys, on, fn {owner_key, related_key}, on ->
+        dynamic([o, q], ^on and field(q, ^related_key) == field(o, ^owner_key))
+      end)
+
+    from(o in owner, join: q in ^queryable, on: ^on)
+    |> Ecto.Association.combine_joins_query(assoc.where, 1)
+  end
+
+  def joins_query(
         %{related_key: related_key, owner: owner, owner_key: owner_key, queryable: queryable} =
           assoc
       ) do
@@ -1194,6 +1491,11 @@ defmodule Ecto.Association.BelongsTo do
   end
 
   @impl true
+  def assoc_query(%{related_key: related_keys} = assoc, query, values)
+      when is_list(related_keys) do
+    Ecto.Association.composite_assoc_query(assoc, query, values)
+  end
+
   def assoc_query(%{related_key: related_key, queryable: queryable} = assoc, query, [value]) do
     from(x in (query || queryable), where: field(x, ^related_key) == ^value)
     |> Ecto.Association.combine_assoc_query(assoc.where)

@@ -1074,6 +1074,65 @@ defmodule Ecto.SchemaTest do
     assert :fk == refl.related_key
   end
 
+  test "composite has_many stores every key in association metadata" do
+    defmodule CompositeHasOwner do
+      use Ecto.Schema
+
+      schema "owners" do
+        field :tenant_id, :string
+
+        has_many :posts, Post,
+          references: [:tenant_id, :id],
+          foreign_key: [:tenant_id, :owner_id]
+      end
+    end
+
+    refl = CompositeHasOwner.__schema__(:association, :posts)
+    assert refl.owner_key == [:tenant_id, :id]
+    assert refl.related_key == [:tenant_id, :owner_id]
+    assert CompositeHasOwner.__changeset__().posts == {:assoc, refl}
+  end
+
+  test "composite has_many validates key lists and owner fields" do
+    assert_raise ArgumentError, ~r/:references for association :posts must be a non-empty list of atoms/, fn ->
+      defmodule CompositeHasMissingReferences do
+        use Ecto.Schema
+
+        schema "owners" do
+          has_many :posts, Post, foreign_key: [:tenant_id, :owner_id]
+        end
+      end
+    end
+
+    assert_raise ArgumentError,
+                 ~r/:foreign_key and :references for association :posts must have the same number of fields/,
+                 fn ->
+                   defmodule CompositeHasMismatchedKeys do
+                     use Ecto.Schema
+
+                     schema "owners" do
+                       field :tenant_id, :string
+
+                       has_many :posts, Post,
+                         references: [:tenant_id, :id],
+                         foreign_key: [:owner_id]
+                     end
+                   end
+                 end
+
+    assert_raise ArgumentError, ~r/schema does not have the field :tenant_id/, fn ->
+      defmodule CompositeHasMissingOwnerField do
+        use Ecto.Schema
+
+        schema "owners" do
+          has_many :posts, Post,
+            references: [:tenant_id, :id],
+            foreign_key: [:tenant_id, :owner_id]
+        end
+      end
+    end
+  end
+
   test "has_one options" do
     refl = CustomAssocSchema.__schema__(:association, :author)
     assert :pk == refl.owner_key
@@ -1091,6 +1150,108 @@ defmodule Ecto.SchemaTest do
 
     assert CustomAssocSchema.__schema__(:type, :fk) == :string
     assert CustomAssocSchema.__schema__(:type, :permalink2_id) == :string
+  end
+
+  test "composite belongs_to validates foreign key and reference lists" do
+    assert_raise ArgumentError,
+                 ~r/:foreign_key for association :parent must be an atom or a non-empty list of atoms/,
+                 fn ->
+                   defmodule InvalidCompositeForeignKey do
+                     use Ecto.Schema
+
+                     schema "children" do
+                       belongs_to :parent, Parent,
+                         foreign_key: [:tenant_id, "parent_id"],
+                         references: [:tenant_id, :id],
+                         define_field: false
+                     end
+                   end
+                 end
+
+    assert_raise ArgumentError,
+                 ~r/:references for association :parent must be a non-empty list of atoms/,
+                 fn ->
+                   defmodule MissingCompositeReferences do
+                     use Ecto.Schema
+
+                     schema "children" do
+                       belongs_to :parent, Parent,
+                         foreign_key: [:tenant_id, :parent_id],
+                         define_field: false
+                     end
+                   end
+                 end
+  end
+
+  test "composite belongs_to requires matching key counts" do
+    assert_raise ArgumentError,
+                 ~r/:foreign_key and :references for association :parent must have the same number of fields/,
+                 fn ->
+                   defmodule MismatchedCompositeReferences do
+                     use Ecto.Schema
+
+                     schema "children" do
+                       belongs_to :parent, Parent,
+                         foreign_key: [:tenant_id, :parent_id],
+                         references: [:id],
+                         define_field: false
+                     end
+                   end
+                 end
+  end
+
+  test "composite belongs_to does not define fields by default" do
+    defmodule DefaultDefineFieldCompositeForeignKey do
+      use Ecto.Schema
+
+      schema "children" do
+        field :tenant_id, :string
+        field :parent_id, :id
+
+        belongs_to :parent, Parent,
+          foreign_key: [:tenant_id, :parent_id],
+          references: [:tenant_id, :id]
+      end
+    end
+
+    assert DefaultDefineFieldCompositeForeignKey.__schema__(:association, :parent).owner_key ==
+             [:tenant_id, :parent_id]
+
+    assert DefaultDefineFieldCompositeForeignKey.__schema__(:fields) ==
+             [:id, :tenant_id, :parent_id]
+  end
+
+  test "composite belongs_to requires manually defined fields" do
+    assert_raise ArgumentError,
+                 "define_field for :parent must be false when foreign_key is a list",
+                 fn ->
+                   defmodule AutomaticallyDefinedCompositeForeignKey do
+                     use Ecto.Schema
+
+                     schema "children" do
+                       belongs_to :parent, Parent,
+                         foreign_key: [:tenant_id, :parent_id],
+                         references: [:tenant_id, :id],
+                         define_field: true
+                     end
+                   end
+                 end
+  end
+
+  test "composite belongs_to rejects field definition options" do
+    assert_raise ArgumentError, "invalid option :primary_key for belongs_to/3", fn ->
+      defmodule CompositeBelongsToPrimaryKeyOption do
+        use Ecto.Schema
+
+        schema "children" do
+          belongs_to :parent, Parent,
+            foreign_key: [:tenant_id, :parent_id],
+            references: [:tenant_id, :id],
+            define_field: false,
+            primary_key: true
+        end
+      end
+    end
   end
 
   test "has_* validates option" do

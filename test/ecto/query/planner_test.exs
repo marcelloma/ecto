@@ -1808,6 +1808,28 @@ defmodule Ecto.Query.PlannerTest do
       query = from(Comment, []) |> select([c], c.crazy_post_with_list)
       normalize(query)
     end
+
+    defmodule CompositeComment do
+      use Ecto.Schema
+
+      schema "composite_comments" do
+        field :tenant_id, :integer
+        field :post_id, :integer
+
+        belongs_to :post, Ecto.Query.PlannerTest.Post,
+          foreign_key: [:tenant_id, :post_id],
+          references: [:tenant_id, :id],
+          define_field: false
+      end
+    end
+
+    message =
+      ~r"field `post` in `select` is an association in schema Ecto.Query.PlannerTest.CompositeComment. Did you mean to use `tenant_id`, `post_id`"
+
+    assert_raise Ecto.QueryError, message, fn ->
+      query = from(CompositeComment, []) |> select([c], c.post)
+      normalize(query)
+    end
   end
 
   test "normalize: allow virtual fields in type/2" do

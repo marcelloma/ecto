@@ -527,7 +527,7 @@ defmodule Ecto do
         for(
           struct <- structs,
           assert_struct!(schema, struct),
-          key = Map.fetch!(struct, owner_key),
+          key = assoc_key_value(struct, owner_key),
           do: key
         )
       )
@@ -544,6 +544,14 @@ defmodule Ecto do
         }
     end
   end
+
+  defp assoc_key_value(struct, keys) when is_list(keys) do
+    keys
+    |> Enum.map(&Map.fetch!(struct, &1))
+    |> List.to_tuple()
+  end
+
+  defp assoc_key_value(struct, key), do: Map.fetch!(struct, key)
 
   defp assoc_prefix(sample, opts) do
     case Keyword.fetch(opts, :prefix) do

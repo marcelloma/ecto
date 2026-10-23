@@ -35,6 +35,115 @@ defmodule Ecto.Repo.BelongsToTest do
     end
   end
 
+  defmodule CompositeParent do
+    use Ecto.Schema
+
+    schema "composite_parents" do
+      field :tenant_id, :string
+    end
+
+    def changeset(parent, params) do
+      Ecto.Changeset.cast(parent, params, [:tenant_id])
+    end
+  end
+
+  defmodule CompositeChild do
+    use Ecto.Schema
+
+    schema "composite_children" do
+      field :tenant_id, :string
+      field :parent_id, :id
+
+      belongs_to :parent, CompositeParent,
+        foreign_key: [:tenant_id, :parent_id],
+        references: [:tenant_id, :id],
+        define_field: false,
+        on_replace: :nilify
+    end
+  end
+
+  test "copies every composite foreign key when inserting a belongs_to association" do
+    child =
+      %CompositeChild{}
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.put_assoc(:parent, %CompositeParent{tenant_id: "east"})
+      |> TestRepo.insert!()
+
+    assert child.tenant_id == "east"
+    assert child.parent_id == child.parent.id
+  end
+
+  test "copies every composite foreign key when casting a belongs_to association" do
+    child =
+      %CompositeChild{}
+      |> Ecto.Changeset.cast(%{parent: %{tenant_id: "east"}}, [])
+      |> Ecto.Changeset.cast_assoc(:parent)
+      |> TestRepo.insert!()
+
+    assert child.tenant_id == "east"
+    assert child.parent_id == child.parent.id
+  end
+
+  test "rejects a conflicting change to one composite foreign key" do
+    parent = %CompositeParent{id: 10, tenant_id: "east"} |> put_meta(state: :loaded)
+
+    changeset =
+      %CompositeChild{}
+      |> Ecto.Changeset.change(parent_id: 11)
+      |> Ecto.Changeset.put_assoc(:parent, parent)
+
+    assert_raise ArgumentError, ~r/foreign key `parent_id`/, fn ->
+      TestRepo.insert!(changeset)
+    end
+  end
+
+  test "clears every composite foreign key when removing a belongs_to association" do
+    parent = %CompositeParent{id: 10, tenant_id: "east"} |> put_meta(state: :loaded)
+
+    child =
+      %CompositeChild{id: 1, tenant_id: "east", parent_id: 10, parent: parent}
+      |> put_meta(state: :loaded)
+
+    updated =
+      child
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.put_assoc(:parent, nil)
+      |> TestRepo.update!()
+
+    assert updated.parent == nil
+    assert updated.tenant_id == nil
+    assert updated.parent_id == nil
+  end
+
+  test "resets a loaded composite association when one foreign key changes" do
+    parent = %CompositeParent{id: 10, tenant_id: "east"}
+
+    child =
+      %CompositeChild{id: 1, tenant_id: "east", parent_id: 10, parent: parent}
+      |> put_meta(state: :loaded)
+
+    updated =
+      child
+      |> Ecto.Changeset.change(tenant_id: "west")
+      |> TestRepo.update!()
+
+    assert updated.tenant_id == "west"
+    assert updated.parent_id == 10
+    assert %Ecto.Association.NotLoaded{} = updated.parent
+  end
+
+  test "resets a nil composite association when a foreign key is set" do
+    child = %CompositeChild{id: 1, parent: nil} |> put_meta(state: :loaded)
+
+    updated =
+      child
+      |> Ecto.Changeset.change(parent_id: 10)
+      |> TestRepo.update!()
+
+    assert updated.parent_id == 10
+    assert %Ecto.Association.NotLoaded{} = updated.parent
+  end
+
   test "handles assocs on insert" do
     sample = %MyAssoc{x: "xyz"}
 
