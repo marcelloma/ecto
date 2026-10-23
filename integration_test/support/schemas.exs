@@ -80,6 +80,19 @@ defmodule Ecto.Integration.Post do
   end
 end
 
+defmodule Ecto.Integration.PostWithCompositeAuthor do
+  use Ecto.Integration.Schema
+
+  schema "posts" do
+    field :title, :string
+    field :author_id, :id
+
+    belongs_to :author, Ecto.Integration.User,
+      foreign_key: [:author_id, :title],
+      references: [:id, :name]
+  end
+end
+
 defmodule Ecto.Integration.Comment do
   @moduledoc """
   This module is used to test:
@@ -164,6 +177,10 @@ defmodule Ecto.Integration.User do
     has_many :comments, Ecto.Integration.Comment, foreign_key: :author_id, on_delete: :nilify_all, on_replace: :nilify
     has_one :permalink, Ecto.Integration.Permalink, on_replace: :nilify
     has_many :posts, Ecto.Integration.Post, foreign_key: :author_id, on_delete: :nothing, on_replace: :delete
+    has_many :posts_by_name, Ecto.Integration.PostWithCompositeAuthor,
+      references: [:id, :name], foreign_key: [:author_id, :title], on_replace: :nilify
+    has_one :post_by_name, Ecto.Integration.PostWithCompositeAuthor,
+      references: [:id, :name], foreign_key: [:author_id, :title], on_replace: :nilify
     belongs_to :custom, Ecto.Integration.Custom, references: :bid, type: :binary_id
     many_to_many :schema_posts, Ecto.Integration.Post, join_through: Ecto.Integration.PostUser
     many_to_many :unique_posts, Ecto.Integration.Post, join_through: Ecto.Integration.PostUserCompositePk
@@ -176,6 +193,32 @@ defmodule Ecto.Integration.User do
     has_many :co_commenters, through: [:comments, :post, :comments_authors]
 
     timestamps(type: :utc_datetime)
+  end
+end
+
+defmodule Ecto.Integration.CompositeNamedUser do
+  use Ecto.Integration.Schema
+
+  schema "users" do
+    field :name, :string
+
+    has_many :posts_by_name, Ecto.Integration.PostWithCompositeAuthor,
+      references: [:id, :name],
+      foreign_key: [:author_id, :title],
+      on_delete: :nilify_all
+  end
+end
+
+defmodule Ecto.Integration.CompositeNamedUserHasOne do
+  use Ecto.Integration.Schema
+
+  schema "users" do
+    field :name, :string
+
+    has_one :post_by_name, Ecto.Integration.PostWithCompositeAuthor,
+      references: [:id, :name],
+      foreign_key: [:author_id, :title],
+      on_delete: :nilify_all
   end
 end
 
@@ -304,7 +347,25 @@ defmodule Ecto.Integration.CompositePk do
     field :a, :integer, primary_key: true
     field :b, :integer, primary_key: true
     field :name, :string
+    belongs_to :post, Ecto.Integration.Post, foreign_key: :a, define_field: false
+
+    has_many :post_users, Ecto.Integration.PostUserCompositePk,
+      references: [:a, :b],
+      foreign_key: [:post_id, :user_id]
+
+    has_one :post_user, Ecto.Integration.PostUserCompositePk,
+      references: [:a, :b],
+      foreign_key: [:post_id, :user_id]
+
+    has_many :post_users_delete, Ecto.Integration.PostUserCompositePk,
+      references: [:a, :b],
+      foreign_key: [:post_id, :user_id],
+      on_delete: :delete_all
+
+    has_many :posts_via_post_users, through: [:post_users, :post]
+    has_one :post_via_post_user, through: [:post_user, :post]
   end
+
   def changeset(schema, params) do
     cast(schema, params, ~w(a b name)a)
   end
@@ -338,6 +399,12 @@ defmodule Ecto.Integration.PostUserCompositePk do
   schema "posts_users_composite_pk" do
     belongs_to :user, Ecto.Integration.User, primary_key: true
     belongs_to :post, Ecto.Integration.Post, primary_key: true
+
+    belongs_to :composite_pk, Ecto.Integration.CompositePk,
+      foreign_key: [:post_id, :user_id],
+      references: [:a, :b]
+
+    has_one :post_via_composite_pk, through: [:composite_pk, :post]
     timestamps()
   end
 end

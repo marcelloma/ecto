@@ -4043,6 +4043,9 @@ defmodule Ecto.Changeset do
     name =
       opts[:name] ||
         case get_assoc_type(changeset, assoc) do
+          %Ecto.Association.BelongsTo{owner_key: [owner_key | _]} ->
+            "#{get_source(changeset)}_#{owner_key}_fkey"
+
           %Ecto.Association.BelongsTo{owner_key: owner_key} ->
             "#{get_source(changeset)}_#{owner_key}_fkey"
 
@@ -4107,6 +4110,8 @@ defmodule Ecto.Changeset do
           related_key: related_key,
           related: related
         } ->
+          related_key = related_key |> List.wrap() |> hd()
+
           {opts[:name] || "#{related.__schema__(:source)}_#{related_key}_fkey",
            constraint_message(opts, no_assoc_message(cardinality))}
 
@@ -4331,6 +4336,14 @@ defmodule Ecto.Changeset do
     acc = Map.put(acc, key, relation_changed)
 
     case relation do
+      %Ecto.Association.BelongsTo{related_key: related_keys, owner_key: owner_keys}
+      when is_list(owner_keys) ->
+        Enum.zip(owner_keys, related_keys)
+        |> Enum.reduce(acc, fn {owner_key, related_key}, acc ->
+          id = relation_changed && Map.fetch!(relation_changed, related_key)
+          Map.put(acc, owner_key, id)
+        end)
+
       %Ecto.Association.BelongsTo{related_key: related_key, owner_key: owner_key} ->
         id = relation_changed && Map.fetch!(relation_changed, related_key)
         Map.put(acc, owner_key, id)

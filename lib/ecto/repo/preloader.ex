@@ -29,7 +29,7 @@ defmodule Ecto.Repo.Preloader do
 
     rows
     |> extract()
-    |> normalize_and_preload_each(repo_name, preloads, take, assocs, tuplet)
+    |> normalize_and_preload_each(repo_name, preloads, take, assocs, :exact, tuplet)
     |> unextract(rows, fun)
   end
 
@@ -57,11 +57,20 @@ defmodule Ecto.Repo.Preloader do
 
   def preload(structs, repo_name, preloads, {_adapter_meta, opts} = tuplet)
       when is_list(structs) do
-    normalize_and_preload_each(structs, repo_name, preloads, opts[:take], %{}, tuplet)
+    normalize_and_preload_each(structs, repo_name, preloads, opts[:take], %{}, :per_field, tuplet)
   end
 
   def preload(struct, repo_name, preloads, {_adapter_meta, opts} = tuplet) when is_map(struct) do
-    normalize_and_preload_each([struct], repo_name, preloads, opts[:take], %{}, tuplet) |> hd()
+    normalize_and_preload_each(
+      [struct],
+      repo_name,
+      preloads,
+      opts[:take],
+      %{},
+      :per_field,
+      tuplet
+    )
+    |> hd()
   end
 
   defp normalize_and_preload_each(
@@ -70,11 +79,12 @@ defmodule Ecto.Repo.Preloader do
          preloads,
          take,
          query_assocs,
+         key_filter,
          {adapter_meta, opts}
        ) do
     tuplet = {adapter_meta, Keyword.put(opts, :ecto_query, :preload)}
     preloads = normalize(preloads, take, preloads)
-    preload_each(structs, repo_name, preloads, query_assocs, tuplet)
+    preload_each(structs, repo_name, preloads, query_assocs, key_filter, tuplet)
   rescue
     e ->
       # Reraise errors so we ignore the preload inner stacktrace
@@ -83,22 +93,31 @@ defmodule Ecto.Repo.Preloader do
 
   ## Preloading
 
-  defp preload_each(structs, _repo_name, [], _query_assocs, _tuplet), do: structs
-  defp preload_each([], _repo_name, _preloads, _query_assocs, _tuplet), do: []
+  defp preload_each(structs, _repo_name, [], _query_assocs, _key_filter, _tuplet), do: structs
+  defp preload_each([], _repo_name, _preloads, _query_assocs, _key_filter, _tuplet), do: []
 
-  defp preload_each(structs, repo_name, preloads, query_assocs, tuplet) do
+  defp preload_each(structs, repo_name, preloads, query_assocs, key_filter, tuplet) do
     if sample = Enum.find(structs, & &1) do
       module = sample.__struct__
       prefix = preload_prefix(tuplet, sample)
       {assocs, throughs, embeds} = expand(module, preloads, query_assocs, {%{}, [], []})
-      structs = preload_embeds(structs, embeds, repo_name, tuplet)
-      structs = preload_throughs(structs, throughs, repo_name, query_assocs, tuplet)
+      structs = preload_embeds(structs, embeds, repo_name, key_filter, tuplet)
+      structs = preload_throughs(structs, throughs, repo_name, query_assocs, key_filter, tuplet)
 
       {fetched_assocs, to_fetch_queries} =
-        prepare_queries(structs, module, assocs, prefix, repo_name, tuplet)
+        prepare_queries(structs, module, assocs, prefix, repo_name, key_filter, tuplet)
 
       fetched_queries = maybe_pmap(to_fetch_queries, repo_name, tuplet)
-      assocs = preload_assocs(fetched_assocs, fetched_queries, repo_name, query_assocs, tuplet)
+
+      assocs =
+        preload_assocs(
+          fetched_assocs,
+          fetched_queries,
+          repo_name,
+          query_assocs,
+          key_filter,
+          tuplet
+        )
 
       for struct <- structs do
         struct = Enum.reduce(assocs, struct, &load_assoc/2)
@@ -127,7 +146,7 @@ defmodule Ecto.Repo.Preloader do
   ## Association preloading
 
   # First we traverse all assocs and find which queries we need to run.
-  defp prepare_queries(structs, module, assocs, prefix, repo_name, tuplet) do
+  defp prepare_queries(structs, module, assocs, prefix, repo_name, key_filter, tuplet) do
     Enum.reduce(assocs, {[], []}, fn
       {_key, {{:assoc, assoc, related_key}, take, query, preloads}}, {assocs, queries} ->
         {fetch_ids, loaded_ids, loaded_structs} = fetch_ids(structs, module, assoc, tuplet)
@@ -136,7 +155,17 @@ defmodule Ecto.Repo.Preloader do
           if fetch_ids != [] do
             [
               fn tuplet ->
-                fetch_query(fetch_ids, assoc, repo_name, query, prefix, related_key, take, tuplet)
+                fetch_query(
+                  fetch_ids,
+                  assoc,
+                  repo_name,
+                  query,
+                  prefix,
+                  related_key,
+                  take,
+                  key_filter,
+                  tuplet
+                )
               end
               | queries
             ]
@@ -195,6 +224,7 @@ defmodule Ecto.Repo.Preloader do
          queries,
          repo_name,
          query_assocs,
+         key_filter,
          tuplet
        ) do
     {fetch_ids, fetch_structs, queries} = maybe_unpack_query(query?, queries)
@@ -206,20 +236,21 @@ defmodule Ecto.Repo.Preloader do
         repo_name,
         sub_preloads,
         sub_query_assocs,
+        key_filter,
         tuplet
       )
 
     entry =
-      {:assoc, assoc, assoc_map(assoc.cardinality, Enum.reverse(loaded_ids, fetch_ids), all)}
+      {:assoc, assoc, assoc_map(assoc, Enum.reverse(loaded_ids, fetch_ids), all)}
 
-    [entry | preload_assocs(assocs, queries, repo_name, query_assocs, tuplet)]
+    [entry | preload_assocs(assocs, queries, repo_name, query_assocs, key_filter, tuplet)]
   end
 
-  defp preload_assocs([] = _assocs, [] = _queries, _, _, _), do: []
+  defp preload_assocs([] = _assocs, [] = _queries, _, _, _, _), do: []
 
-  defp preload_embeds(structs, [] = _embeds, _, _), do: structs
+  defp preload_embeds(structs, [] = _embeds, _, _, _), do: structs
 
-  defp preload_embeds(structs, [embed | embeds], repo_name, tuplet) do
+  defp preload_embeds(structs, [embed | embeds], repo_name, key_filter, tuplet) do
     {%{field: field, cardinality: card}, sub_preloads} = embed
 
     {embed_structs, counts} =
@@ -242,28 +273,36 @@ defmodule Ecto.Repo.Preloader do
 
     # It is not possible for an embed to be preloaded through Ecto.Query.preload
     # Therefore, we don't consider associations coming from queries
-    embed_structs = preload_each(embed_structs, repo_name, sub_preloads, %{}, tuplet)
+    embed_structs = preload_each(embed_structs, repo_name, sub_preloads, %{}, key_filter, tuplet)
     structs = put_through_or_embed(card, field, structs, embed_structs, Enum.reverse(counts), [])
-    preload_embeds(structs, embeds, repo_name, tuplet)
+    preload_embeds(structs, embeds, repo_name, key_filter, tuplet)
   end
 
-  defp preload_throughs(structs, [] = _throughs, _, _, _), do: structs
+  defp preload_throughs(structs, [] = _throughs, _, _, _, _), do: structs
 
   defp preload_throughs(
          structs,
          [{_, _, false = _from_query?} | throughs],
          repo_name,
          query_assocs,
+         key_filter,
          tuplet
        ) do
     # Through associations will not be preloaded directly unless they were
     # loaded through a join using Ecto.Query.preload. When using Ecto.Repo.preload
     # or Ecto.Query.preload where the through association is not part of a join,
     # the chain of associations making up the through association are preloaded instead.
-    preload_throughs(structs, throughs, repo_name, query_assocs, tuplet)
+    preload_throughs(structs, throughs, repo_name, query_assocs, key_filter, tuplet)
   end
 
-  defp preload_throughs(structs, [through | throughs], repo_name, query_assocs, tuplet) do
+  defp preload_throughs(
+         structs,
+         [through | throughs],
+         repo_name,
+         query_assocs,
+         key_filter,
+         tuplet
+       ) do
     {{_, %{field: field, cardinality: card}, _}, sub_preloads, true} = through
     sub_query_assocs = Map.get(query_assocs, field, %{})
 
@@ -287,12 +326,12 @@ defmodule Ecto.Repo.Preloader do
       end)
 
     through_structs =
-      preload_each(through_structs, repo_name, sub_preloads, sub_query_assocs, tuplet)
+      preload_each(through_structs, repo_name, sub_preloads, sub_query_assocs, key_filter, tuplet)
 
     structs =
       put_through_or_embed(card, field, structs, through_structs, Enum.reverse(counts), [])
 
-    preload_throughs(structs, throughs, repo_name, query_assocs, tuplet)
+    preload_throughs(structs, throughs, repo_name, query_assocs, key_filter, tuplet)
   end
 
   defp put_through_or_embed(_card, _field, [], [], [], acc), do: Enum.reverse(acc)
@@ -339,19 +378,13 @@ defmodule Ecto.Repo.Preloader do
 
       struct, {fetch_ids, loaded_ids, loaded_structs} ->
         assert_struct!(module, struct)
-        %{^owner_key => id, ^field => value} = struct
+        id = owner_key_value(struct, owner_key)
+        value = Map.fetch!(struct, field)
         loaded? = Ecto.assoc_loaded?(value) and not force?
 
-        if loaded? and is_nil(id) and not Ecto.Changeset.Relation.empty?(assoc, value) do
-          Logger.warning("""
-          association `#{field}` for `#{inspect(module)}` has a loaded value but \
-          its association key `#{owner_key}` is nil. This usually means one of:
-
-            * `#{owner_key}` was not selected in a query
-            * the struct was set with default values for `#{field}` which now you want to override
-
-          If this is intentional, set force: true to disable this warning
-          """)
+        if loaded? and missing_id?(id, owner_key) and
+             not Ecto.Changeset.Relation.empty?(assoc, value) do
+          warn_missing_key(module, field, owner_key)
         end
 
         cond do
@@ -359,9 +392,13 @@ defmodule Ecto.Repo.Preloader do
             {fetch_ids, [id | loaded_ids], [value | loaded_structs]}
 
           card == :many and loaded? ->
-            {fetch_ids, [{id, length(value)} | loaded_ids], value ++ loaded_structs}
+            loaded_id =
+              if is_list(owner_key), do: {:composite, id}, else: id
 
-          is_nil(id) ->
+            {fetch_ids, [{:loaded, loaded_id, length(value)} | loaded_ids],
+             value ++ loaded_structs}
+
+          missing_id?(id, owner_key) ->
             {fetch_ids, loaded_ids, loaded_structs}
 
           true ->
@@ -370,7 +407,52 @@ defmodule Ecto.Repo.Preloader do
     end)
   end
 
-  defp fetch_query(ids, assoc, _repo_name, query, _prefix, related_key, _take, _tuplet)
+  defp warn_missing_key(module, field, owner_keys) when is_list(owner_keys) do
+    Logger.warning("""
+    association `#{field}` for `#{inspect(module)}` has a loaded value but \
+    one or more of its association key fields `#{inspect(owner_keys)}` are nil. This usually means one of:
+
+      * one or more of these fields were not selected in the query
+      * the struct was set with default values for `#{field}` which now you want to override
+
+    If this is intentional, set force: true to disable this warning
+    """)
+  end
+
+  defp warn_missing_key(module, field, owner_key) do
+    Logger.warning("""
+    association `#{field}` for `#{inspect(module)}` has a loaded value but \
+    its association key `#{owner_key}` is nil. This usually means one of:
+
+      * `#{owner_key}` was not selected in a query
+      * the struct was set with default values for `#{field}` which now you want to override
+
+    If this is intentional, set force: true to disable this warning
+    """)
+  end
+
+  defp owner_key_value(struct, keys) when is_list(keys) do
+    keys |> Enum.map(&Map.fetch!(struct, &1)) |> List.to_tuple()
+  end
+
+  defp owner_key_value(struct, key), do: Map.fetch!(struct, key)
+
+  defp missing_id?(id, keys) when is_list(keys),
+    do: id |> Tuple.to_list() |> Enum.any?(&is_nil/1)
+
+  defp missing_id?(id, _key), do: is_nil(id)
+
+  defp fetch_query(
+         ids,
+         assoc,
+         _repo_name,
+         query,
+         _prefix,
+         related_key,
+         _take,
+         _key_filter,
+         _tuplet
+       )
        when is_function(query, 1) or is_function(query, 2) do
     # Note we use an explicit sort because we don't want
     # to reorder based on the struct. Only the ID.
@@ -390,9 +472,20 @@ defmodule Ecto.Repo.Preloader do
          prefix,
          related_key,
          take,
+         key_filter,
          tuplet
        ) do
-    query = assoc.__struct__.assoc_query(assoc, query, Enum.uniq(ids))
+    ids = Enum.uniq(ids)
+
+    query =
+      case {key_filter, assoc} do
+        {:per_field, %{related_key: keys}} when is_list(keys) ->
+          Ecto.Association.composite_preload_query(assoc, query, ids)
+
+        _ ->
+          assoc.__struct__.assoc_query(assoc, query, ids)
+      end
+
     related_field_ast = related_key_to_field(query, related_key)
 
     # Normalize query
@@ -414,10 +507,16 @@ defmodule Ecto.Repo.Preloader do
         {:many, _} ->
           query = add_preload_order(assoc.preload_order, query)
 
+          key_order =
+            case related_field_ast do
+              {:{}, _, fields} -> Enum.map(fields, &{:asc, &1})
+              field -> [asc: field]
+            end
+
           update_in(query.order_bys, fn order_bys ->
             [
               %Ecto.Query.ByExpr{
-                expr: [asc: related_field_ast],
+                expr: key_order,
                 params: [],
                 file: __ENV__.file,
                 line: __ENV__.line
@@ -430,7 +529,19 @@ defmodule Ecto.Repo.Preloader do
           query
       end
 
-    unzip_ids(Ecto.Repo.Queryable.all(repo_name, query, tuplet), [], [])
+    records = Ecto.Repo.Queryable.all(repo_name, query, tuplet)
+
+    records =
+      case {key_filter, assoc} do
+        {:per_field, %{related_key: keys}} when is_list(keys) ->
+          ids = MapSet.new(ids)
+          Enum.filter(records, fn {id, _} -> MapSet.member?(ids, id) end)
+
+        _ ->
+          records
+      end
+
+    unzip_ids(records, [], [])
   end
 
   defp preload_function(ids, _assoc, query) when is_function(query, 1), do: query.(ids)
@@ -438,6 +549,11 @@ defmodule Ecto.Repo.Preloader do
 
   defp fetched_records_to_tuple_ids([], _assoc, _related_key),
     do: []
+
+  defp fetched_records_to_tuple_ids([%{} | _] = entries, _assoc, {0, keys})
+       when is_list(keys) do
+    Enum.map(entries, fn entry -> {owner_key_value(entry, keys), entry} end)
+  end
 
   defp fetched_records_to_tuple_ids([%{} | _] = entries, _assoc, {0, key}),
     do: Enum.map(entries, &{Map.fetch!(&1, key), &1})
@@ -486,6 +602,11 @@ defmodule Ecto.Repo.Preloader do
     {:type, [], [field_ast, field_type]}
   end
 
+  defp related_key_to_field(query, {pos, keys}) when is_list(keys) do
+    fields = Enum.map(keys, &related_key_to_field(query, {pos, &1}))
+    {:{}, [], fields}
+  end
+
   defp related_key_to_field(query, {pos, key}) do
     {{:., [], [{:&, [], [related_key_pos(query, pos)]}, key]}, [], []}
   end
@@ -495,7 +616,7 @@ defmodule Ecto.Repo.Preloader do
 
   defp add_preload_order([], query), do: query
 
-  defp add_preload_order(_order, %{order_bys: [_|_]} = query) do
+  defp add_preload_order(_order, %{order_bys: [_ | _]} = query) do
     # Skip applying preload_order when query already has custom order_by clauses
     query
   end
@@ -549,12 +670,13 @@ defmodule Ecto.Repo.Preloader do
             "got: #{inspect(mod)} and #{inspect(struct)}"
   end
 
-  defp assoc_map(:one, ids, structs) do
+  defp assoc_map(%{cardinality: :one}, ids, structs) do
     one_assoc_map(ids, structs, %{})
   end
 
-  defp assoc_map(:many, ids, structs) do
-    many_assoc_map(ids, structs, %{})
+  defp assoc_map(%{cardinality: :many, owner_key: owner_key}, ids, structs) do
+    key_kind = if is_list(owner_key), do: :composite, else: :scalar
+    many_assoc_map(ids, structs, %{}, key_kind)
   end
 
   defp one_assoc_map([id | ids], [struct | structs], map) do
@@ -565,17 +687,22 @@ defmodule Ecto.Repo.Preloader do
     map
   end
 
-  defp many_assoc_map([{id, n} | ids], structs, map) do
+  defp many_assoc_map([{:loaded, {:composite, id}, n} | ids], structs, map, :composite) do
     {acc, structs} = split_n(structs, n, [])
-    many_assoc_map(ids, structs, Map.put(map, id, acc))
+    many_assoc_map(ids, structs, Map.put(map, id, acc), :composite)
   end
 
-  defp many_assoc_map([id | ids], [struct | structs], map) do
+  defp many_assoc_map([{:loaded, id, n} | ids], structs, map, :scalar) do
+    {acc, structs} = split_n(structs, n, [])
+    many_assoc_map(ids, structs, Map.put(map, id, acc), :scalar)
+  end
+
+  defp many_assoc_map([id | ids], [struct | structs], map, key_kind) do
     {ids, structs, acc} = split_while(ids, structs, id, [struct])
-    many_assoc_map(ids, structs, Map.put(map, id, acc))
+    many_assoc_map(ids, structs, Map.put(map, id, acc), key_kind)
   end
 
-  defp many_assoc_map([], [], map) do
+  defp many_assoc_map([], [], map, _key_kind) do
     map
   end
 
@@ -596,7 +723,7 @@ defmodule Ecto.Repo.Preloader do
 
   defp load_assoc({:assoc, assoc, ids}, struct) do
     %{field: field, owner_key: owner_key, cardinality: cardinality} = assoc
-    key = Map.fetch!(struct, owner_key)
+    key = owner_key_value(struct, owner_key)
 
     loaded =
       case ids do

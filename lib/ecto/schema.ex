@@ -2210,23 +2210,65 @@ defmodule Ecto.Schema do
     :where
   ]
 
+  @valid_belongs_to_composite_options [
+    :foreign_key,
+    :references,
+    :define_field,
+    :on_replace,
+    :defaults,
+    :where
+  ]
+
   @doc false
   def __belongs_to__(mod, name, queryable, opts) do
     opts = Keyword.put_new(opts, :foreign_key, :"#{name}_id")
+    define_field? = Keyword.get(opts, :define_field, true)
 
-    foreign_key_name = opts[:foreign_key]
-    foreign_key_type = opts[:type] || Module.get_attribute(mod, :foreign_key_type, :id)
-    foreign_key_type = check_field_type!(mod, name, foreign_key_type, opts)
-    check_options!(foreign_key_type, opts, @valid_belongs_to_options, "belongs_to/3")
+    case opts[:foreign_key] do
+      foreign_key_name when is_atom(foreign_key_name) ->
+        foreign_key_type = opts[:type] || Module.get_attribute(mod, :foreign_key_type, :id)
+        foreign_key_type = check_field_type!(mod, name, foreign_key_type, opts)
+        check_options!(foreign_key_type, opts, @valid_belongs_to_options, "belongs_to/3")
 
-    if foreign_key_name == name do
-      raise ArgumentError,
-            "foreign_key #{inspect(name)} must be distinct from corresponding association name"
-    end
+        if foreign_key_name == name do
+          raise ArgumentError,
+                "foreign_key #{inspect(name)} must be distinct from corresponding association name"
+        end
 
-    if Keyword.get(opts, :define_field, true) do
-      Module.put_attribute(mod, :ecto_changeset_fields, {foreign_key_name, foreign_key_type})
-      define_field(mod, foreign_key_name, foreign_key_type, opts)
+        if define_field? do
+          Module.put_attribute(mod, :ecto_changeset_fields, {foreign_key_name, foreign_key_type})
+          define_field(mod, foreign_key_name, foreign_key_type, opts)
+        end
+
+      foreign_key_names ->
+        references = opts[:references]
+
+        unless is_list(foreign_key_names) and foreign_key_names != [] and
+                 Enum.all?(foreign_key_names, &is_atom/1) do
+          raise ArgumentError,
+                ":foreign_key for association #{inspect(name)} must be an atom or a non-empty " <>
+                  "list of atoms, got: #{inspect(foreign_key_names)}"
+        end
+
+        unless is_list(references) and references != [] and
+                 Enum.all?(references, &is_atom/1) do
+          raise ArgumentError,
+                ":references for association #{inspect(name)} must be a non-empty list " <>
+                  "of atoms when :foreign_key is a list, got: #{inspect(references)}"
+        end
+
+        if length(foreign_key_names) != length(references) do
+          raise ArgumentError,
+                ":foreign_key and :references for association #{inspect(name)} must have " <>
+                  "the same number of fields, got #{length(foreign_key_names)} foreign keys and #{length(references)} references"
+        end
+
+        if Keyword.get(opts, :define_field, false) do
+          raise ArgumentError,
+                "define_field for #{inspect(name)} must be false when foreign_key is a list"
+        end
+
+        check_options!(opts, @valid_belongs_to_composite_options, "belongs_to/3")
     end
 
     struct =

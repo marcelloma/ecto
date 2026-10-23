@@ -2589,7 +2589,7 @@ defmodule Ecto.Query.Planner do
               query,
               expr,
               "field `#{field}` in `#{kind}` is an association in schema #{inspect(schema)}. " <>
-                "Did you mean to use `#{owner_key}`?"
+                "Did you mean to use #{owner_key |> List.wrap() |> Enum.map_join(", ", &"`#{&1}`")}?"
             )
 
           %_{} ->

@@ -18,6 +18,35 @@ defmodule Ecto.RepoTest do
     end
   end
 
+  defmodule MyCompositeParent do
+    use Ecto.Schema
+
+    schema "composite_parents" do
+      field :tenant_id, :string
+
+      has_many :children, Ecto.RepoTest.MyCompositeChild,
+        references: [:tenant_id, :id],
+        foreign_key: [:tenant_id, :parent_id]
+
+      has_one :child, Ecto.RepoTest.MyCompositeChild,
+        references: [:tenant_id, :id],
+        foreign_key: [:tenant_id, :parent_id]
+    end
+  end
+
+  defmodule MyCompositeChild do
+    use Ecto.Schema
+
+    schema "composite_children" do
+      field :tenant_id, :string
+      field :parent_id, :id
+
+      belongs_to :parent, Ecto.RepoTest.MyCompositeParent,
+        foreign_key: [:tenant_id, :parent_id],
+        references: [:tenant_id, :id]
+    end
+  end
+
   defmodule MyParentWithPrefix do
     use Ecto.Schema
 
@@ -2328,6 +2357,96 @@ defmodule Ecto.RepoTest do
   end
 
   describe "preload" do
+    test "composite keys" do
+      for {schema, field} <- [
+            {MyCompositeChild, :parent},
+            {MyCompositeParent, :children},
+            {MyCompositeParent, :child}
+          ] do
+        owners =
+          for id <- 1..100 do
+            struct(schema, id: id, tenant_id: "tenant#{id}", parent_id: id)
+          end
+
+        Process.put(:test_repo_all_results, {0, []})
+        TestRepo.preload(owners, field)
+
+        assert_receive {:all, query}
+        assert [%{expr: {:in, _, _}}, %{expr: {:in, _, _}}] = query.wheres
+      end
+    end
+
+    test "composite keys equality" do
+      owners = [
+        %MyCompositeChild{tenant_id: "east", parent_id: 1},
+        %MyCompositeChild{tenant_id: "east", parent_id: 2}
+      ]
+
+      Process.put(:test_repo_all_results, {0, []})
+
+      TestRepo.preload(owners, :parent)
+
+      assert_receive {:all, query}
+      assert [%{expr: {:==, _, _}}, %{expr: {:in, _, _}}] = query.wheres
+    end
+
+    test "composite belongs_to query" do
+      rows = [
+        [%MyCompositeChild{tenant_id: "east", parent_id: 1}],
+        [%MyCompositeChild{tenant_id: "west", parent_id: 2}]
+      ]
+
+      Process.put(:test_repo_all_results, {2, [[1, "east", "east", 1], [2, "west", "west", 2]]})
+
+      [c1, c2] =
+        Ecto.Repo.Preloader.query(
+          rows,
+          TestRepo,
+          [:parent],
+          nil,
+          [],
+          fn [struct] -> struct end,
+          {Ecto.Repo.Registry.lookup(TestRepo), []}
+        )
+
+      assert_receive {:all, query}
+      assert [%{expr: {:or, _, [{:and, _, _}, {:and, _, _}]}}] = query.wheres
+      assert %MyCompositeParent{id: 1, tenant_id: "east"} = c1.parent
+      assert %MyCompositeParent{id: 2, tenant_id: "west"} = c2.parent
+    end
+
+    test "composite belongs_to nested" do
+      owners = [
+        %MyCompositeChild{tenant_id: "east", parent_id: 1},
+        %MyCompositeChild{tenant_id: "west", parent_id: 2}
+      ]
+
+      Process.put(
+        :test_repo_all_results,
+        {3,
+         [
+           [1, "east", "east", 1],
+           [2, "west", "west", 2],
+           [2, "east", "east", 2]
+         ]}
+      )
+
+      on_exit(fn -> Process.delete(:test_repo_all_results) end)
+
+      [east, west] =
+        TestRepo.preload(owners,
+          parent: [
+            children: fn ids ->
+              assert MapSet.new(ids) == MapSet.new([{"east", 1}, {"west", 2}])
+              []
+            end
+          ]
+        )
+
+      assert %MyCompositeParent{id: 1, tenant_id: "east"} = east.parent
+      assert %MyCompositeParent{id: 2, tenant_id: "west"} = west.parent
+    end
+
     test "returns nil if first argument of preload is nil" do
       assert TestRepo.preload(nil, []) == nil
     end

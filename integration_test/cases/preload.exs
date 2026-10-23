@@ -6,11 +6,14 @@ defmodule Ecto.Integration.PreloadTest do
 
   alias Ecto.Integration.Post
   alias Ecto.Integration.Comment
+  alias Ecto.Integration.CompositePk
   alias Ecto.Integration.Item
   alias Ecto.Integration.Permalink
   alias Ecto.Integration.User
   alias Ecto.Integration.Custom
   alias Ecto.Integration.Order
+  alias Ecto.Integration.PostUserCompositePk
+  alias Ecto.Integration.PostWithCompositeAuthor
 
   test "preload with parameter from select_merge" do
     p1 = TestRepo.insert!(%Post{title: "p1"})
@@ -88,6 +91,148 @@ defmodule Ecto.Integration.PreloadTest do
     assert %Post{id: ^pid1} = pl1.post
     refute pl2.post
     assert %Post{id: ^pid3} = pl3.post
+  end
+
+  test "preload composite belongs_to through" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    pu1 = TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    pu2 = TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+    pu3 = %PostUserCompositePk{post_id: p1.id}
+
+    [pu2, pu3, pu1] =
+      TestRepo.preload([pu2, pu3, pu1], [:composite_pk, :post_via_composite_pk])
+
+    assert %CompositePk{a: a1, b: b1} = pu1.composite_pk
+    assert {a1, b1} == {p1.id, u1.id}
+    assert %CompositePk{a: a2, b: b2} = pu2.composite_pk
+    assert {a2, b2} == {p2.id, u2.id}
+    assert pu3.composite_pk == nil
+
+    assert %Post{id: pid1} = pu1.post_via_composite_pk
+    assert %Post{id: pid2} = pu2.post_via_composite_pk
+    assert {pid1, pid2} == {p1.id, p2.id}
+    assert pu3.post_via_composite_pk == nil
+  end
+
+  test "preload composite has_many through" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    cp1 = TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    cp2 = TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    cp3 = TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    pu1 = TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    pu2 = TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+
+    cp4 = %CompositePk{a: p1.id}
+
+    [cp2, cp3, cp4, cp1] =
+      TestRepo.preload(
+        [cp2, cp3, cp4, cp1],
+        [:post_users, :posts_via_post_users]
+      )
+
+    assert [%PostUserCompositePk{post_id: pid, user_id: uid}] = cp1.post_users
+    assert {pid, uid} == {pu1.post_id, pu1.user_id}
+
+    assert [%PostUserCompositePk{post_id: pid, user_id: uid}] = cp2.post_users
+    assert {pid, uid} == {pu2.post_id, pu2.user_id}
+    assert cp3.post_users == []
+    assert cp4.post_users == []
+    assert [%Post{id: pid1}] = cp1.posts_via_post_users
+    assert [%Post{id: pid2}] = cp2.posts_via_post_users
+    assert {pid1, pid2} == {p1.id, p2.id}
+    assert cp3.posts_via_post_users == []
+    assert cp4.posts_via_post_users == []
+  end
+
+  test "preload composite has_one through" do
+    p1 = TestRepo.insert!(%Post{})
+    p2 = TestRepo.insert!(%Post{})
+    u1 = TestRepo.insert!(%User{})
+    u2 = TestRepo.insert!(%User{})
+
+    cp1 = TestRepo.insert!(%CompositePk{a: p1.id, b: u1.id})
+    cp2 = TestRepo.insert!(%CompositePk{a: p2.id, b: u2.id})
+    cp3 = TestRepo.insert!(%CompositePk{a: p1.id, b: u2.id})
+
+    TestRepo.insert!(%PostUserCompositePk{post_id: p1.id, user_id: u1.id})
+    TestRepo.insert!(%PostUserCompositePk{post_id: p2.id, user_id: u2.id})
+
+    cp4 = %CompositePk{a: p1.id}
+
+    [cp2, cp3, cp4, cp1] =
+      TestRepo.preload(
+        [cp2, cp3, cp4, cp1],
+        [:post_user, :post_via_post_user]
+      )
+
+    assert %PostUserCompositePk{post_id: pid1, user_id: uid1} = cp1.post_user
+    assert {pid1, uid1} == {p1.id, u1.id}
+
+    assert %PostUserCompositePk{post_id: pid2, user_id: uid2} = cp2.post_user
+
+    assert {pid2, uid2} == {p2.id, u2.id}
+    assert cp3.post_user == nil
+    assert cp4.post_user == nil
+
+    assert %Post{id: ^pid1} = cp1.post_via_post_user
+    assert %Post{id: ^pid2} = cp2.post_via_post_user
+    assert cp3.post_via_post_user == nil
+    assert cp4.post_via_post_user == nil
+  end
+
+  test "preload composite has_many" do
+    u1 = TestRepo.insert!(%User{name: "east"})
+    u2 = TestRepo.insert!(%User{name: "west"})
+
+    p1 = TestRepo.insert!(%PostWithCompositeAuthor{author_id: u1.id, title: "east"})
+    p2 = TestRepo.insert!(%PostWithCompositeAuthor{author_id: u1.id, title: "east"})
+    p3 = TestRepo.insert!(%PostWithCompositeAuthor{author_id: u1.id, title: "west"})
+
+    [u1, u2] = TestRepo.preload([u1, u2], :posts_by_name)
+
+    assert MapSet.new(Enum.map(u1.posts_by_name, & &1.id)) == MapSet.new([p1.id, p2.id])
+    assert u2.posts_by_name == []
+    refute Enum.any?(u1.posts_by_name, &(&1.id == p3.id))
+  end
+
+  test "preload composite has_one" do
+    u1 = TestRepo.insert!(%User{name: "east"})
+    u2 = TestRepo.insert!(%User{name: "west"})
+
+    p1 = TestRepo.insert!(%PostWithCompositeAuthor{author_id: u1.id, title: "east"})
+    TestRepo.insert!(%PostWithCompositeAuthor{author_id: u1.id, title: "west"})
+
+    [u1, u2] = TestRepo.preload([u1, u2], :post_by_name)
+
+    assert %PostWithCompositeAuthor{id: pid1} = u1.post_by_name
+    assert pid1 == p1.id
+    assert u2.post_by_name == nil
+  end
+
+  test "preload composite belongs_to" do
+    u1 = TestRepo.insert!(%User{name: "east"})
+    p1 = TestRepo.insert!(%PostWithCompositeAuthor{author_id: u1.id, title: "east"})
+    p2 = TestRepo.insert!(%PostWithCompositeAuthor{author_id: u1.id, title: "west"})
+
+    [p1, p2] = TestRepo.preload([p1, p2], :author)
+
+    assert %User{id: uid1, name: "east"} = p1.author
+    assert uid1 == u1.id
+    assert p2.author == nil
+    assert TestRepo.all(Ecto.assoc(p2, :author)) == []
   end
 
   test "preload multiple belongs_to" do
